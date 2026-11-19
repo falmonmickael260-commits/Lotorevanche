@@ -8,6 +8,7 @@ run/main_scene="res://loto.tscn"
 window/size/viewport_width=660
 window/size/viewport_height=1000
 window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [rendering]
 renderer/rendering_method="gl_compatibility"

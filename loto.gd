@@ -35,6 +35,20 @@ var chat_panel: VBoxContainer
 var chat_log: RichTextLabel
 var chat_input: LineEdit
 var status: Label
+var wallet_label: Label
+var ticket_layout: BoxContainer
+var entry_layout: BoxContainer
+var stage_meter: ProgressBar
+var buy_summary: Label
+var purchase_panel: VBoxContainer
+var lobby_grid: GridContainer
+var stage_phase: Label
+var ticket_progress: ProgressBar
+var ticket_back: Button
+var ticket_forward: Button
+var award_key := ""
+var wallet_tween: Tween
+var last_balance := -1
 var connection: PanelContainer
 var home: VBoxContainer
 var game: VBoxContainer
@@ -385,7 +399,16 @@ func update_view(snapshot: Dictionary) -> void:
 		snapshot.cards = synced_cards
 	current = snapshot
 	next_draw_at = Time.get_ticks_msec() + int(snapshot.get("remaining", 0))
-	status.text = "%s  •  %d pièces%s" % [snapshot.nickname, snapshot.balance, " de test" if snapshot.test_mode else ""]
+	status.text = snapshot.nickname
+	wallet_label.text = "%s pièces%s" % [coin_amount(snapshot.balance), " de test" if snapshot.test_mode else ""]
+	wallet_label.get_parent().get_parent().show()
+	if last_balance >= 0 and last_balance != int(snapshot.balance):
+		if wallet_tween:
+			wallet_tween.kill()
+		wallet_label.modulate = MINT if int(snapshot.balance) > last_balance else GOLD
+		wallet_tween = create_tween()
+		wallet_tween.tween_property(wallet_label, "modulate", Color.WHITE, 0.65)
+	last_balance = int(snapshot.balance)
 	connection.hide()
 	home.visible = snapshot.code == ""
 	game.visible = snapshot.code != ""
@@ -397,6 +420,8 @@ func update_view(snapshot: Dictionary) -> void:
 
 func connection_lost() -> void:
 	current.clear()
+	last_balance = -1
+	wallet_label.get_parent().get_parent().hide()
 	synced_cards.clear()
 	synced_code = ""
 	marked.clear()
@@ -498,6 +523,35 @@ func emphasis(node: Button) -> void:
 		node.add_theme_stylebox_override(state, panel_style(fill, fill))
 		node.add_theme_color_override("font_color" if state == "normal" else "font_%s_color" % state, Color("#21180e"))
 
+func coin_amount(amount: int) -> String:
+	var digits := str(amount)
+	for index in range(digits.length() - 3, 0, -3):
+		digits = digits.insert(index, " ")
+	return digits
+
+func meter(parent: Node, limit: float, accent: Color) -> ProgressBar:
+	var progress := ProgressBar.new()
+	progress.show_percentage = false
+	progress.max_value = limit
+	progress.custom_minimum_size.y = 5
+	progress.add_theme_stylebox_override("background", ball_chip(Color("#254239")))
+	progress.add_theme_stylebox_override("fill", ball_chip(accent))
+	parent.add_child(progress)
+	return progress
+
+func select_ticket(index: int) -> void:
+	selected_ticket = clampi(index, 0, current.cards.size() - 1)
+	ticket_picker.select(selected_ticket)
+	render_card()
+
+func adapt_layout() -> void:
+	ticket_layout.vertical = size.x < 1070
+	entry_layout.vertical = ticket_layout.vertical
+	cage.custom_minimum_size.y = 188 if ticket_layout.vertical else 252
+	called_board.columns = 15 if ticket_layout.vertical else 10
+	if is_instance_valid(lobby_grid):
+		lobby_grid.columns = 1 if ticket_layout.vertical else 2
+
 func build_ui() -> void:
 	var skin := Theme.new()
 	skin.default_font_size = 17
@@ -511,8 +565,17 @@ func build_ui() -> void:
 	skin.set_color("font_disabled_color", "Button", Color("#9daea5"))
 	theme = skin
 
-	var background := ColorRect.new()
-	background.color = Color("#091813")
+	var background := TextureRect.new()
+	var tones := Gradient.new()
+	tones.colors = PackedColorArray([Color("#1d392b"), Color("#081512")])
+	var lighting := GradientTexture2D.new()
+	lighting.gradient = tones
+	lighting.fill = GradientTexture2D.FILL_RADIAL
+	lighting.fill_from = Vector2(0.52, 0.13)
+	lighting.fill_to = Vector2(0.96, 0.85)
+	background.texture = lighting
+	background.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(background)
 	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	var frame := column(self, 0)
@@ -528,20 +591,33 @@ func build_ui() -> void:
 	scroll.add_child(padding)
 	root = column(padding, 11)
 	var brand := row(root)
-	var wordmark := label(brand, "LOTO  REVANCHE", 27, GOLD)
-	wordmark.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	status = label(root, "Entre ton pseudo pour rejoindre un salon.", 15)
+	var brand_name := column(brand, 0)
+	brand_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label(brand_name, "REVANCHE GAMES", 13, MINT)
+	label(brand_name, "Loto Revanche", 34, GOLD)
+	var wallet_chip := surface(brand, "#172c23", "#536344")
+	var wallet_stack := column(wallet_chip, 0)
+	label(wallet_stack, "PORTEFEUILLE", 12, MUTED)
+	wallet_label = label(wallet_stack, "", 22, GOLD)
+	wallet_chip.hide()
+	status = label(root, "Entre dans la salle pour voir les parties ouvertes.", 15)
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body = column(root)
 	connection = surface(body, "#11261f", "#2d5144")
-	var form := column(connection, 12)
+	entry_layout = BoxContainer.new()
+	entry_layout.add_theme_constant_override("separation", 20)
+	connection.add_child(entry_layout)
 	var cover := TextureRect.new()
 	cover.texture = COVER
 	cover.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	cover.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	cover.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	cover.custom_minimum_size.y = 335
-	form.add_child(cover)
-	label(form, "Entrer dans la salle", 24, GOLD)
+	cover.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	entry_layout.add_child(cover)
+	var form := column(entry_layout, 12)
+	form.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	form.alignment = BoxContainer.ALIGNMENT_CENTER
+	label(form, "Entrer dans la salle", 26, GOLD)
 	var nickname := field(form, "Ton pseudo")
 	nickname.max_length = 20
 	var address := field(form, "Adresse du serveur", default_address)
@@ -554,11 +630,16 @@ func build_ui() -> void:
 	home.hide()
 	game = column(body, 9)
 	game.hide()
-	var room_info := column(game, 1)
-	room_header = label(room_info, "", 18, Color("#fbf3e5"))
-	pot_label = label(room_info, "", 15, MINT)
+	var room_info := row(surface(game, "#132a22", "#3c5f4d"), 12)
+	var room_title := column(room_info, 2)
+	room_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	room_header = label(room_title, "", 22, Color("#fbf3e5"))
+	pot_label = label(room_title, "", 15, MINT)
+	stage_phase = label(room_info, "ENTRÉES OUVERTES", 13, GOLD)
+	stage_phase.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 
-	var stage := row(surface(game, "#0e2520", "#3d5a45"), 10)
+	var theatre := column(surface(game, "#0c221b", "#61724d"), 8)
+	var stage := row(theatre, 14)
 	cage = SubViewportContainer.new()
 	cage.custom_minimum_size = Vector2(0, 173)
 	cage.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -568,19 +649,30 @@ func build_ui() -> void:
 	stage.add_child(cage)
 	var display_panel := surface(stage, "#071813", "#678774")
 	display_panel.custom_minimum_size.x = 185
-	var display := column(display_panel, 3)
+	var display := column(display_panel, 1)
 	display.alignment = BoxContainer.ALIGNMENT_CENTER
-	var display_name := label(display, "NUMÉRO SORTI", 15, MINT)
+	var display_name := label(display, "DERNIÈRE BOULE", 14, MINT)
 	display_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	ball_label = label(display, "–", 62, GOLD)
+	ball_label = label(display, "–", 86, GOLD)
 	ball_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	var mono := SystemFont.new()
 	mono.font_names = PackedStringArray(["Menlo", "DejaVu Sans Mono", "monospace"])
 	ball_label.add_theme_font_override("font", mono)
+	ball_label.add_theme_color_override("font_shadow_color", Color("#7d5129"))
+	ball_label.add_theme_constant_override("shadow_offset_y", 2)
 	draw_status = label(display, "En attente", 14)
 	draw_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	stage_meter = meter(theatre, 90.0, GOLD)
+	recent_balls = label(theatre, "Aucune boule tirée", 15, MINT)
 
-	var board := column(surface(game, "#10241e", "#29483e"), 5)
+	ticket_layout = BoxContainer.new()
+	ticket_layout.add_theme_constant_override("separation", 12)
+	game.add_child(ticket_layout)
+	var ticket_column := column(ticket_layout, 10)
+	ticket_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var board_column := column(ticket_layout, 10)
+	board_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var board := column(surface(board_column, "#10241e", "#29483e"), 5)
 	var board_toolbar := row(board)
 	board_heading = button(board_toolbar, "Numéros sortis", func():
 		called_board.visible = not called_board.visible
@@ -588,7 +680,6 @@ func build_ui() -> void:
 	board_heading.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	board_heading.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	order_button = button(board_toolbar, "Ordre du tirage", switch_board_order)
-	recent_balls = label(board, "Aucune boule tirée", 14, MINT)
 	called_board = GridContainer.new()
 	called_board.columns = 15
 	called_board.add_theme_constant_override("h_separation", 3)
@@ -601,15 +692,18 @@ func build_ui() -> void:
 		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		called_cells.append(cell)
 
-	var ticket_panel := column(surface(game, "#19372e", "#46705d"), 6)
+	var ticket_panel := column(surface(ticket_column, "#19372e", "#46705d"), 9)
 	var ticket_header := row(ticket_panel)
 	card_caption = label(ticket_header, "Ton carton", 19, Color("#fff1d8"))
 	card_caption.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ticket_back = button(ticket_header, "‹", func(): select_ticket(selected_ticket - 1))
+	ticket_back.tooltip_text = "Carton précédent"
 	ticket_picker = OptionButton.new()
-	ticket_picker.item_selected.connect(func(index: int):
-		selected_ticket = index
-		render_card())
+	ticket_picker.item_selected.connect(select_ticket)
 	ticket_header.add_child(ticket_picker)
+	ticket_forward = button(ticket_header, "›", func(): select_ticket(selected_ticket + 1))
+	ticket_forward.tooltip_text = "Carton suivant"
+	ticket_progress = meter(ticket_panel, 15.0, MINT)
 	number_grid = GridContainer.new()
 	number_grid.columns = 9
 	number_grid.add_theme_constant_override("h_separation", 4)
@@ -617,11 +711,13 @@ func build_ui() -> void:
 	ticket_panel.add_child(number_grid)
 	for index in range(27):
 		var cell := button(number_grid, "", func(): toggle_cell(index))
-		cell.custom_minimum_size.y = 35
+		cell.custom_minimum_size.y = 43
 		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		cell.add_theme_font_size_override("font_size", 19)
 		ticket_cells.append(cell)
-	buy_controls = row(ticket_panel)
+	purchase_panel = column(surface(ticket_column, "#112820", "#3c624e"), 7)
+	label(purchase_panel, "Acheter des cartons", 20, GOLD)
+	buy_controls = row(purchase_panel)
 	quantity = SpinBox.new()
 	quantity.min_value = 1
 	quantity.max_value = 1
@@ -631,13 +727,18 @@ func build_ui() -> void:
 	buy_button = button(buy_controls, "Acheter des cartons", func():
 		action.rpc_id(1, "buy", int(quantity.value)))
 	buy_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	start_button = button(ticket_panel, "Lancer le tirage", func(): action.rpc_id(1, "start"))
+	emphasis(buy_button)
+	buy_summary = label(purchase_panel, "", 14, MUTED)
+	buy_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	start_button = button(purchase_panel, "Lancer le tirage", func(): action.rpc_id(1, "start"))
 	emphasis(start_button)
 	claim_button = button(ticket_panel, "Quine !", func():
 		action.rpc_id(1, "claim", {"stage": current.awards.size(), "ticket": selected_ticket,
 			"numbers": marked.get(selected_ticket, [])}))
 	emphasis(claim_button)
-	results = column(surface(game, "#10241e", "#29483e"), 3)
+	results = column(surface(board_column, "#10241e", "#405f4c"), 6)
+	resized.connect(adapt_layout)
+	adapt_layout()
 
 	var footer_panel := surface(frame, "#10231d", "#3b5146")
 	var footer := column(footer_panel, 6)
@@ -685,22 +786,30 @@ func render_lobby() -> void:
 	clear_children(home)
 	var create := column(surface(home, "#123023", "#3e6351"))
 	label(create, "Créer un salon", 24, GOLD)
-	label(create, "Choisis le prix d’un carton.", 15)
+	label(create, "Choisis le prix du carton. Ton premier carton est acheté à l’ouverture du salon.", 15).autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	var prices := row(create, 5)
 	for price in Room.PRICES:
-		var node := button(prices, "%d" % price, func(): action.rpc_id(1, "create", price))
+		var node := button(prices, coin_amount(price), func(): action.rpc_id(1, "create", price))
 		node.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		node.disabled = current.balance < price
 		emphasis(node)
-	label(home, "Salons ouverts", 23, Color("#fff1d8"))
+	label(home, "Salons ouverts  ·  %d" % current.lobby.size(), 23, Color("#fff1d8"))
 	if current.lobby.is_empty():
 		label(home, "Aucun salon ouvert pour le moment.")
+	lobby_grid = GridContainer.new()
+	lobby_grid.add_theme_constant_override("h_separation", 10)
+	lobby_grid.add_theme_constant_override("v_separation", 10)
+	home.add_child(lobby_grid)
+	adapt_layout()
 	for entry in current.lobby:
-		var group := column(surface(home, "#10241e", "#35564b"), 4)
+		var card := surface(lobby_grid, "#10241e", "#35564b")
+		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var group := column(card, 7)
 		label(group, "Salon %s · %s" % [entry.code, entry.host], 19, GOLD)
 		label(group, "%d joueurs · %d cartons · Cagnotte %d pièces" % [entry.count,
 			entry.tickets, entry.tickets * entry.price], 15)
-		label(group, "Quines %d / %d  ·  Carton plein %d" % entry.prizes, 15, MINT)
+		label(group, "Quines %s / %s  ·  Carton plein %s" % [
+			coin_amount(entry.prizes[0]), coin_amount(entry.prizes[1]), coin_amount(entry.prizes[2])], 15, MINT)
 		var join := button(group, "Rejoindre · %d pièces" % entry.price,
 			func(): action.rpc_id(1, "join", entry.code))
 		join.disabled = current.balance < entry.price
@@ -722,11 +831,13 @@ func render_game() -> void:
 	room_header.text = "Salon %s  ·  %d joueurs  ·  %d cartons" % [current.code,
 		current.count, current.tickets]
 	var total: int = current.price * current.tickets
-	pot_label.text = "Cagnotte %d pièces  ·  Carton %d pièces" % [total, current.price]
+	pot_label.text = "Cagnotte %s pièces  ·  Carton %s pièces" % [coin_amount(total), coin_amount(current.price)]
+	stage_phase.text = {"attente": "ENTRÉES OUVERTES", "partie": "TIRAGE EN COURS",
+		"règlement": "VERSEMENT", "terminée": "PARTIE TERMINÉE"}[current.phase]
 	start_button.visible = current.host and current.phase == "attente"
 	start_button.disabled = current.count < 2
 	start_button.text = "En attente d’un 2ᵉ joueur" if start_button.disabled else "Lancer le tirage"
-	buy_controls.visible = current.phase == "attente"
+	purchase_panel.visible = current.phase == "attente"
 	quantity.max_value = maxi(1, floori(float(current.balance) / current.price))
 	refresh_price()
 	var drawn: Array = current.drawn
@@ -791,6 +902,7 @@ func paint_board() -> void:
 	var recent := PackedStringArray()
 	for number in shown.slice(maxi(0, shown.size() - 7)):
 		recent.append(str(number).pad_zeros(2))
+	stage_meter.value = shown.size()
 	recent_balls.text = "Dernières sorties   " + "  ·  ".join(recent) if not recent.is_empty() else "Aucune boule tirée"
 	for index in range(90):
 		var number: int = shown[index] if chronological and index < shown.size() else index + 1
@@ -811,8 +923,11 @@ func refresh_price() -> void:
 		return
 	var amount := int(quantity.value) * int(current.price)
 	buy_button.disabled = current.balance < amount
-	buy_button.text = "Acheter · %d pièces" % amount
-	quantity.editable = not buy_button.disabled
+	buy_button.text = "Acheter · %s pièces" % coin_amount(amount)
+	var quantity_count := int(quantity.value)
+	var priced := "%d × %s pièces" % [quantity_count, coin_amount(current.price)]
+	buy_summary.text = "%s   ·   Solde après achat %s" % [priced, coin_amount(current.balance - amount)] if not buy_button.disabled else "%s   ·   Solde insuffisant" % priced
+	quantity.editable = current.balance >= current.price
 
 func render_card() -> void:
 	var cards: Array = current.cards
@@ -822,11 +937,17 @@ func render_card() -> void:
 			ticket_picker.add_item("Carton %d" % (index + 1))
 		ticket_picker.select(selected_ticket)
 	ticket_picker.visible = cards.size() > 1
+	ticket_back.visible = ticket_picker.visible
+	ticket_forward.visible = ticket_picker.visible
+	ticket_back.disabled = selected_ticket == 0
+	ticket_forward.disabled = selected_ticket + 1 >= cards.size()
 	var marks: Array = marked.get(selected_ticket, [])
 	var used: Array = current.used_lines.get(selected_ticket, [])
 	var card: Array = cards[selected_ticket]
 	var drawn: Array = current.drawn
-	card_caption.text = "Ton carton · %d / 15 cochés" % marks.size()
+	card_caption.text = "Mon carton   %d / 15" % marks.size()
+	card_caption.tooltip_text = "Les numéros sortis sont dorés. Touche un numéro pour le cocher."
+	ticket_progress.value = marks.size()
 	for index in range(ticket_cells.size()):
 		@warning_ignore("integer_division")
 		var line := index / 9
@@ -881,13 +1002,20 @@ func render_card() -> void:
 				break
 
 func render_results() -> void:
+	var key := "%s/%s/%s/%s" % [current.code, current.phase, str(current.prizes), str(current.awards)]
+	if key == award_key:
+		return
+	award_key = key
 	clear_children(results)
-	label(results, "Les gains", 19, GOLD)
+	label(results, "Gains du salon", 21, GOLD)
 	for index in range(Room.TITLES.size()):
-		var result := row(results)
+		var active: bool = index == current.awards.size() and current.phase == "partie"
+		var won: bool = index < current.awards.size()
+		var result := row(surface(results, "#163c2e" if won else ("#3b3220" if active else "#142b23"),
+			"#4d8167" if won else ("#ac8b56" if active else "#284436")))
 		var name := label(result, Room.TITLES[index], 15, GOLD if index == current.awards.size() else MUTED)
 		name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var caption := "%d pièces" % current.prizes[index]
+		var caption := "%s pièces" % coin_amount(current.prizes[index])
 		if index < current.awards.size():
 			caption = "%s · %s" % [current.awards[index].name, caption]
 		elif current.phase == "terminée":

@@ -81,6 +81,8 @@ var start_button: Button
 var number_grid: GridContainer
 var results: VBoxContainer
 var selected_nickname := ""
+var connect_button: Button
+var connect_deadline := 0
 
 func _ready() -> void:
 	server_mode = "--server" in OS.get_cmdline_user_args()
@@ -113,9 +115,13 @@ func _ready() -> void:
 		action.rpc_id(1, "hello", {"name": selected_nickname, "token": platform_token}))
 	multiplayer.connection_failed.connect(connection_lost)
 	multiplayer.server_disconnected.connect(connection_lost)
+	if not platform_token.is_empty():
+		connect_game(default_address, "")
 
 func _process(_delta: float) -> void:
 	if not server_mode:
+		if connect_deadline > 0 and Time.get_ticks_msec() >= connect_deadline:
+			connection_lost()
 		update_clock()
 		return
 	var now := Time.get_ticks_msec()
@@ -381,10 +387,13 @@ func sync_cards(code: String, offset: int, batch: Array) -> void:
 
 @rpc("authority", "call_remote", "reliable")
 func hint(message: String) -> void:
+	if connect_deadline > 0:
+		connection_lost()
 	status.text = message
 
 @rpc("authority", "call_remote", "reliable")
 func update_view(snapshot: Dictionary) -> void:
+	connect_deadline = 0
 	if current.get("code", "") != snapshot.code:
 		if reveal_tween:
 			reveal_tween.kill()
@@ -419,6 +428,9 @@ func update_view(snapshot: Dictionary) -> void:
 		render_lobby()
 
 func connection_lost() -> void:
+	connect_deadline = 0
+	connect_button.disabled = false
+	connect_button.text = "Réessayer"
 	current.clear()
 	last_balance = -1
 	wallet_label.get_parent().get_parent().hide()
@@ -451,12 +463,18 @@ func connect_game(address: String, nickname: String) -> void:
 	if selected_nickname.is_empty() and platform_token.is_empty():
 		status.text = "Choisis un pseudo pour entrer."
 		return
+	if connect_deadline > 0:
+		return
 	var peer := WebSocketMultiplayerPeer.new()
 	var error := peer.create_client(address.strip_edges())
 	if error != OK:
 		status.text = "Adresse invalide. Exemple : ws://127.0.0.1:8071"
 		return
-	status.text = "Connexion au tirage…"
+	status.text = "Chargement des salons…"
+	connect_button.disabled = true
+	connect_deadline = Time.get_ticks_msec() + 16000
+	if not platform_token.is_empty():
+		connection.hide()
 	multiplayer.multiplayer_peer = peer
 
 func panel_style(color: Color, border: Color) -> StyleBoxFlat:
@@ -623,9 +641,11 @@ func build_ui() -> void:
 	var address := field(form, "Adresse du serveur", default_address)
 	address.visible = not OS.has_feature("web")
 	nickname.visible = platform_token.is_empty()
-	var enter := button(form, "Entrer dans le loto", func(): connect_game(address.text, nickname.text))
-	emphasis(enter)
-	nickname.text_submitted.connect(func(_text): enter.pressed.emit())
+	connect_button = button(form, "Entrer dans le loto", func(): connect_game(address.text, nickname.text))
+	emphasis(connect_button)
+	nickname.text_submitted.connect(func(_text):
+		if not connect_button.disabled:
+			connect_button.pressed.emit())
 	home = column(body)
 	home.hide()
 	game = column(body, 9)
@@ -784,15 +804,6 @@ func render_lobby() -> void:
 	lobby_cache = current.lobby
 	remembered_balance = current.balance
 	clear_children(home)
-	var create := column(surface(home, "#123023", "#3e6351"))
-	label(create, "Créer un salon", 24, GOLD)
-	label(create, "Choisis le prix du carton. Ton premier carton est acheté à l’ouverture du salon.", 15).autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	var prices := row(create, 5)
-	for price in Room.PRICES:
-		var node := button(prices, coin_amount(price), func(): action.rpc_id(1, "create", price))
-		node.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		node.disabled = current.balance < price
-		emphasis(node)
 	label(home, "Salons ouverts  ·  %d" % current.lobby.size(), 23, Color("#fff1d8"))
 	if current.lobby.is_empty():
 		label(home, "Aucun salon ouvert pour le moment.")
@@ -813,6 +824,16 @@ func render_lobby() -> void:
 		var join := button(group, "Rejoindre · %d pièces" % entry.price,
 			func(): action.rpc_id(1, "join", entry.code))
 		join.disabled = current.balance < entry.price
+
+	var create := column(surface(home, "#123023", "#3e6351"))
+	label(create, "Créer un salon", 24, GOLD)
+	label(create, "Choisis le prix du carton. Ton premier carton est acheté à l’ouverture du salon.", 15).autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	var prices := row(create, 5)
+	for price in Room.PRICES:
+		var node := button(prices, coin_amount(price), func(): action.rpc_id(1, "create", price))
+		node.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		node.disabled = current.balance < price
+		emphasis(node)
 
 func update_clock() -> void:
 	if draw_status == null or not game.visible:

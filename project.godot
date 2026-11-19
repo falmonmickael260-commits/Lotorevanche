@@ -1,0 +1,15 @@
+config_version=5
+
+[application]
+config/name="Loto Revanche"
+run/main_scene="res://loto.tscn"
+
+[display]
+window/size/viewport_width=660
+window/size/viewport_height=1000
+window/stretch/mode="canvas_items"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+environment/defaults/default_clear_color=Color(0.047, 0.04, 0.09, 1)

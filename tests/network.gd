@@ -4,6 +4,7 @@ var game: Control
 var role: String
 var sent := {}
 var connect_at := 0
+var original_host := 0
 
 func _initialize() -> void:
 	role = OS.get_cmdline_user_args()[0]
@@ -37,10 +38,10 @@ func _process(_delta: float) -> bool:
 		return false
 	if role == "--server":
 		for room in game.rooms.values():
-			if room.phase == "partie" and not room.bag.is_empty():
-				room.next_draw = mini(room.next_draw, Time.get_ticks_msec() + 35)
+			if room.phase == "partie" and not room.bag.is_empty() and draw_ready(room):
+				room.next_draw = mini(room.next_draw, Time.get_ticks_msec() + 135)
 			if room.phase == "terminée" and game.wallet == null:
-				verify(game.house == 60, "La plateforme doit recevoir 60 pièces sur 300.")
+				verify(game.house == 100, "La plateforme doit recevoir 100 pièces sur 500.")
 		return false
 	var state: Dictionary = game.current
 	if state.is_empty() or Time.get_ticks_msec() < connect_at:
@@ -70,38 +71,94 @@ func _process(_delta: float) -> bool:
 
 	if state.phase == "attente" and role == "Alice":
 		if once("buy"):
-			send("buy", 1)
-		if state.cards.size() == 2 and state.count == 2 and once("start"):
-			verify(state.tickets == 3 and state.balance == 9800, "Deux cartons doivent coûter 200 pièces.")
-			verify(state.prizes == [45, 45, 150], "Les gains doivent dépendre du nombre de cartons.")
+			send("buy", 3)
+		if state.cards.size() == 4 and state.count == 2 and once("start"):
+			verify(state.tickets == 5 and state.balance == 9600 and game.card_views.size() == 4, "Quatre cartons visibles doivent coûter 400 pièces.")
+			verify(state.prizes == [75, 75, 250], "Les gains doivent dépendre du nombre de cartons.")
 			send("chat", "Bonne partie")
 			send("start")
 
-	if state.phase == "partie" and state.drawn.size() == 90 and game.current_ball_label == state.drawn.back() and role == "Alice":
-		var stage: int = state.awards.size()
-		if once(str(stage)):
-			game.ticket_picker.select(1)
-			game.ticket_picker.item_selected.emit(1)
-			if stage == 0:
-				verify(game.marked.is_empty() and game.claim_button.disabled, "Les numéros doivent être cochés à la main.")
-				send("claim", {"stage": stage, "ticket": 0, "numbers": []})
-			if stage == 2:
-				game.ticket_picker.select(0)
-				game.ticket_picker.item_selected.emit(0)
-				verify(game.marked.get(0, []).is_empty(), "Les coches ne doivent pas passer d’un carton à l’autre.")
-			if stage != 1:
-				for cell in game.ticket_cells:
+	if state.phase == "partie" and not state.drawn.is_empty() and role == "Alice":
+		var count: int = state.drawn.size()
+		if once("ball:%d" % count):
+			if count == 1:
+				verify(game.marked.is_empty(), "Une boule annoncée ne doit rien cocher automatiquement.")
+			game.show_ball(state.drawn.back())
+			for ticket in range(3):
+				for cell in game.card_views[ticket].cells:
 					if not cell.disabled:
 						cell.pressed.emit()
-			verify(not game.claim_button.disabled, "La réclamation correcte doit être possible.")
-			game.claim_button.pressed.emit()
+			if count == 4 and not state.test_mode:
+				call_deferred("reconnect")
+		if count > 4 and sent.has("reconnect") and once("resumed"):
+			verify(state.cards.size() == 4 and state.balance == 9600 and not game.marked.is_empty(),
+				"Revenir dans le salon doit restaurer les cartons, les coches et le solde.")
+			var previous: int = state.drawn[1]
+			send("mark", {"ticket": 3, "number": previous})
+		if count >= 6 and sent.has("resumed") and once("resume_report"):
+			verify(game.marked.get(3, []).is_empty(), "Une ancienne boule ne peut pas être cochée.")
+			send("chat", "Reprise vérifiée")
 
+		if count == 90:
+			if once("late"):
+				for line in state.cards[3]:
+					for number in line:
+						if number > 0 and number != state.drawn.back():
+							send("mark", {"ticket": 3, "number": number})
+			var stage: int = state.awards.size()
+			var ticket := 0 if stage == 2 else 1
+			var claim: Button = game.card_views[ticket].claim
+			if not claim.disabled and once("claim:%d" % stage):
+				verify(game.marked.get(3, []).is_empty(), "Un carton oublié doit rester vide.")
+				claim.pressed.emit()
+
+	if "Alice · Reprise vérifiée" in state.chat:
+		print(role, " : quatre cartons, reprise et marquage vérifiés")
+		call_deferred("quit")
+		return false
 	if state.phase == "terminée" and once("done"):
 		verify(state.drawn.size() == 90 and state.awards.size() == 3, "Les trois lots doivent avoir un gagnant.")
 		verify(state.awards[0].ticket == 2 and state.awards[1].ticket == 2 and state.awards[2].ticket == 1,
 			"Le gagnant doit être associé au bon carton.")
-		verify(state.balance == (10040 if role == "Alice" else 9900), "Solde final incorrect.")
+		verify(state.balance == (10000 if role == "Alice" else 9900), "Solde final incorrect.")
 		verify(state.chat.size() == (4 if state.test_mode else 5) and state.chat[0].contains("Bonne partie"), "Chat ou annonces manquants.")
 		print(role, " : partie, cartons, réclamations et solde vérifiés")
 		send("leave")
 	return false
+
+func reconnect() -> void:
+	await create_timer(0.1).timeout
+	if not once("reconnect"):
+		return
+	game.multiplayer.multiplayer_peer.close()
+	game.queue_free()
+	await process_frame
+	begin()
+
+func draw_ready(room) -> bool:
+	if room.drawn.is_empty():
+		original_host = room.host
+		var first_line: Array = room.cards[room.host][0][0]
+		var chosen := 0
+		for number in first_line:
+			if number != 0:
+				chosen = number
+				break
+		room.bag.erase(chosen)
+		room.bag.append(chosen)
+		var second_line: Array = room.cards[room.host][3][0]
+		for number in second_line:
+			if number != 0 and number != chosen:
+				room.bag.erase(number)
+				room.bag.insert(room.bag.size() - 1, number)
+				break
+		return true
+	if room.drawn.size() == 4 and game.wallet and room.host == original_host:
+		return false
+	var number: int = room.drawn.back()
+	var marks: Dictionary = room.player_marks(room.host)
+	for ticket in range(3):
+		for line in room.cards[room.host][ticket]:
+			if number in line and number not in marks.get(ticket, []):
+				return false
+	return true

@@ -1,8 +1,8 @@
 extends SubViewportContainer
 
-const BRASS := Color("#d9a45f")
-const DARK_BRASS := Color("#725139")
-const IVORY := Color("#f4dfb5")
+const BRASS := Color("#ffbf56")
+const DARK_BRASS := Color("#cb5680")
+const IVORY := Color("#fff1b9")
 const REST_SPEED := 0.48
 
 var drum: Node3D
@@ -38,7 +38,7 @@ func setup_lighting() -> void:
 	camera.position = Vector3(3.0, 2.0, 7.9)
 	camera.look_at(Vector3(0.38, 0.04, 0))
 	for spec in [[Vector3(-2, 4, 4), Color("#ffdcac"), 2.8],
-		[Vector3(4, 2, -2), Color("#77f3c1"), 2.7]]:
+		[Vector3(4, 2, -2), Color("#b980ff"), 2.7]]:
 		var light := OmniLight3D.new()
 		light.position = spec[0]
 		light.light_color = spec[1]
@@ -57,7 +57,7 @@ func build_machine() -> void:
 	podium.top_radius = 1.58
 	podium.bottom_radius = 1.72
 	podium.height = 0.21
-	surface(stage, podium, Color("#173d31"), Vector3(0.08, -1.02, 0), 0.45)
+	surface(stage, podium, Color("#623cbd"), Vector3(0.08, -1.02, 0), 0.45)
 	var trim := TorusMesh.new()
 	trim.inner_radius = 1.47
 	trim.outer_radius = 1.53
@@ -92,7 +92,7 @@ func build_machine() -> void:
 	marble.height = 0.224
 	marble.radial_segments = 16
 	marble.rings = 8
-	var colors := [IVORY, Color("#d88773"), Color("#6ebc9d"), Color("#e9bd6e")]
+	var colors := [IVORY, Color("#fc5f9a"), Color("#56e4e1"), Color("#ffdc54")]
 	for index in range(18):
 		inner_balls.append(surface(drum, marble, colors[index % colors.size()], Vector3.ZERO))
 
@@ -133,8 +133,8 @@ func surface(parent: Node3D, mesh: Mesh, color: Color, at: Vector3, metal := 0.0
 	var instance := MeshInstance3D.new()
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color
-	material.roughness = 0.31
-	material.metallic = metal
+	material.roughness = 0.68
+	material.metallic = metal * 0.2
 	material.emission_enabled = true
 	material.emission = color
 	material.emission_energy_multiplier = 0.25

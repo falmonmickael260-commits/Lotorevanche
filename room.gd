@@ -19,6 +19,9 @@ var drawn: Array[int] = []
 var bag: Array[int] = []
 var awards: Array[Dictionary] = []
 var claimed_lines := {}
+var marks := {}
+var wait_until := Time.get_ticks_msec() + 1500000
+var retain_until := 0
 var chat: Array[String] = []
 var phase := "attente"
 var next_draw := 0
@@ -104,7 +107,7 @@ func start() -> void:
 
 func draw() -> void:
 	drawn.append(bag.pop_back())
-	next_draw = Time.get_ticks_msec() + 6000
+	next_draw = Time.get_ticks_msec() + 10000
 
 func complete(row: Array) -> bool:
 	for number in row:
@@ -136,7 +139,7 @@ func used_lines(id: int) -> Dictionary:
 			lines[key.y] = claimed_lines[key]
 	return lines
 
-func marked_row(row: Array, marked: Array) -> bool:
+static func marked_row(row: Array, marked: Array) -> bool:
 	for number in row:
 		if number != 0 and number not in marked:
 			return false
@@ -162,3 +165,39 @@ func add_chat(message: String) -> void:
 	chat.append(message)
 	if chat.size() > 40:
 		chat.pop_front()
+
+func mark_number(id: int, ticket: int, number: int) -> bool:
+	if phase != "partie" or drawn.is_empty() or number != drawn.back() or not cards.has(id):
+		return false
+	if ticket < 0 or ticket >= cards[id].size():
+		return false
+	for row in cards[id][ticket]:
+		if number in row:
+			var key := Vector2i(id, ticket)
+			var previous: Array = marks.get(key, [])
+			if number in previous:
+				return false
+			previous.append(number)
+			marks[key] = previous
+			return true
+	return false
+
+func player_marks(id: int) -> Dictionary:
+	var result := {}
+	for key: Vector2i in marks:
+		if key.x == id:
+			result[key.y] = marks[key]
+	return result
+
+func reassign_player(old_id: int, new_id: int) -> void:
+	for entry: Dictionary in [players, cards, accounts]:
+		if entry.has(old_id):
+			entry[new_id] = entry[old_id]
+			entry.erase(old_id)
+	for entry: Dictionary in [marks, claimed_lines]:
+		for key: Vector2i in entry.keys():
+			if key.x == old_id:
+				entry[Vector2i(new_id, key.y)] = entry[key]
+				entry.erase(key)
+	if host == old_id:
+		host = new_id

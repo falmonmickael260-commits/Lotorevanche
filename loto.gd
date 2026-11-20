@@ -5,9 +5,9 @@ const Room = preload("res://room.gd")
 const Cage = preload("res://cage.gd")
 const PORT := 8071
 const COVER = preload("res://assets/loto-revanche.webp")
-const GOLD := Color("#f9cf8b")
-const MUTED := Color("#a5b9b1")
-const MINT := Color("#87e1bf")
+const GOLD := Color("#ffdb66")
+const MUTED := Color("#e1d8ff")
+const MINT := Color("#88f4d0")
 
 var rooms := {}
 var sessions := {}
@@ -23,9 +23,11 @@ var platform_token := ""
 var default_address := "ws://127.0.0.1:8071"
 var current := {}
 var marked := {}
+var card_views := []
+var card_tiles := {}
+var card_render_key := ""
 var synced_code := ""
 var synced_cards := []
-var selected_ticket := 0
 var next_draw_at := 0
 var chat_open := false
 var last_ball := 0
@@ -43,9 +45,6 @@ var buy_summary: Label
 var purchase_panel: VBoxContainer
 var lobby_grid: GridContainer
 var stage_phase: Label
-var ticket_progress: ProgressBar
-var ticket_back: Button
-var ticket_forward: Button
 var award_key := ""
 var wallet_tween: Tween
 var last_balance := -1
@@ -61,7 +60,6 @@ var order_button: Button
 var chronological := false
 var called_board: GridContainer
 var called_cells: Array[Label] = []
-var ticket_picker: OptionButton
 var card_caption: Label
 var buy_button: Button
 var quantity: SpinBox
@@ -70,11 +68,9 @@ var chat_button: Button
 var dock_ball: Label
 var message_count := 0
 var reveal_tween: Tween
-var ticket_cells: Array[Button] = []
 var current_ball_label := 0
 var lobby_cache := []
 var remembered_balance := -1
-var claim_button: Button
 var room_header: Label
 var pot_label: Label
 var start_button: Button
@@ -129,7 +125,10 @@ func _process(_delta: float) -> void:
 	if wallet and now >= next_sweep_at:
 		next_sweep_at = now + 60000
 		sweep_wallet()
-	for room in rooms.values():
+	for code in rooms:
+		var room = rooms[code]
+		if wallet and not wallet_busy and room.phase == "attente" and now >= room.wait_until:
+			begin_settlement(room, true)
 		if room.pending_balance and not room.wallet_job and now >= room.retry_at:
 			settle_wallet(room)
 			continue
@@ -146,7 +145,7 @@ func _process(_delta: float) -> void:
 
 	if changed:
 		broadcast()
-		remove_finished_rooms()
+	remove_finished_rooms()
 
 func disconnect_player(id: int) -> void:
 	if not sessions.has(id):
@@ -161,8 +160,11 @@ func flush_departures() -> void:
 	wallet_busy = true
 	for id in departing.keys():
 		if sessions.has(id):
-			await leave_room(id, true)
-			sessions.erase(id)
+			if wallet and rooms.has(sessions[id].room):
+				sessions[id].offline = true
+			else:
+				await leave_room(id, true)
+				sessions.erase(id)
 		departing.erase(id)
 	wallet_busy = false
 	broadcast()
@@ -206,14 +208,8 @@ func leave_room(id: int, disconnected := false) -> void:
 		if not room.players.is_empty() and room.host == id:
 			room.host = room.players.keys()[0]
 	session.room = ""
-	if room.phase in ["attente", "terminée"] and not has_connected_players(code):
+	if room.phase == "attente" and room.players.is_empty():
 		rooms.erase(code)
-
-func has_connected_players(code: String) -> bool:
-	for session in sessions.values():
-		if session.room == code:
-			return true
-	return false
 
 func pay(room, id: int, ticket: int, line: int) -> void:
 	var stage: int = room.awards.size()
@@ -283,16 +279,23 @@ func action(kind: String, value: Variant = null) -> void:
 				hint.rpc_id(id, "Il faut au moins deux joueurs pour lancer le tirage.")
 				return
 			room.start()
+		"mark":
+			if room == null or not (value is Dictionary):
+				return
+			if not (value.get("ticket") is int) or not (value.get("number") is int):
+				return
+			if room.mark_number(id, value.ticket, value.number):
+				broadcast(id)
+			return
 		"claim":
 			if room == null or not (value is Dictionary):
 				return
-			var numbers: Variant = value.get("numbers")
-			if not (numbers is Array) or numbers.size() > 15 or value.get("stage") != room.awards.size():
+			if value.get("stage") != room.awards.size():
 				return
 			var ticket: Variant = value.get("ticket")
 			if not (ticket is int):
 				return
-			var line: int = room.eligible(id, ticket, numbers)
+			var line: int = room.eligible(id, ticket, room.marks.get(Vector2i(id, ticket), []))
 			if line < 0:
 				hint.rpc_id(id, "Vérifie que tous les numéros nécessaires sont tirés et cochés.")
 				return
@@ -333,9 +336,22 @@ func close_unclaimed(room) -> void:
 	room.add_chat("Fin du tirage · Les lots non réclamés sont reversés aux cartons.")
 
 func remove_finished_rooms() -> void:
+	var changed := false
 	for key in rooms.keys():
-		if rooms[key].phase == "terminée" and not has_connected_players(key):
+		var room = rooms[key]
+		if room.phase == "terminée" and room.retain_until == 0:
+			room.retain_until = Time.get_ticks_msec() + 300000
+		if room.retain_until > 0 and Time.get_ticks_msec() >= room.retain_until:
+			for peer_id in sessions.keys():
+				if sessions[peer_id].room == key:
+					if sessions[peer_id].get("offline", false):
+						sessions.erase(peer_id)
+					else:
+						sessions[peer_id].room = ""
 			rooms.erase(key)
+			changed = true
+	if changed:
+		broadcast()
 
 func enter_room(id: int, code: String) -> void:
 	var session: Dictionary = sessions[id]
@@ -344,7 +360,7 @@ func enter_room(id: int, code: String) -> void:
 	session.room = code
 	room.add_player(id, session.name)
 
-func broadcast() -> void:
+func broadcast(only_peer := 0) -> void:
 	var lobby := []
 	for code in rooms:
 		var room = rooms[code]
@@ -354,7 +370,9 @@ func broadcast() -> void:
 	var peer := multiplayer.multiplayer_peer as WebSocketMultiplayerPeer
 	var connected := multiplayer.get_peers()
 	for id in sessions:
-		if departing.has(id) or id not in connected or peer.get_peer(id).get_ready_state() != WebSocketPeer.STATE_OPEN:
+		if only_peer != 0 and id != only_peer:
+			continue
+		if sessions[id].get("offline", false) or departing.has(id) or id not in connected or peer.get_peer(id).get_ready_state() != WebSocketPeer.STATE_OPEN:
 			continue
 		var session: Dictionary = sessions[id]
 		var snapshot := {"balance": session.balance, "lobby": lobby, "code": session.room, "test_mode": wallet == null, "nickname": session.name}
@@ -370,7 +388,7 @@ func broadcast() -> void:
 			session.sent_code = session.room
 			snapshot.merge({"drawn": room.drawn, "phase": room.phase,
 				"tickets": room.tickets, "remaining": room.next_draw - Time.get_ticks_msec(),
-				"final_window": room.final_window, "used_lines": room.used_lines(id),
+				"final_window": room.final_window, "used_lines": room.used_lines(id), "marks": room.player_marks(id),
 				"count": room.players.size(), "host": room.host == id, "price": room.price,
 				"awards": room.awards, "prizes": room.prizes(), "chat": room.chat})
 		else:
@@ -398,7 +416,6 @@ func update_view(snapshot: Dictionary) -> void:
 		if reveal_tween:
 			reveal_tween.kill()
 		marked.clear()
-		selected_ticket = 0
 		last_ball = 0
 		chat_open = false
 		message_count = 0
@@ -406,6 +423,7 @@ func update_view(snapshot: Dictionary) -> void:
 		remembered_balance = -1
 	if snapshot.code != "":
 		snapshot.cards = synced_cards
+		marked = snapshot.get("marks", {})
 	current = snapshot
 	next_draw_at = Time.get_ticks_msec() + int(snapshot.get("remaining", 0))
 	status.text = snapshot.nickname
@@ -481,8 +499,8 @@ func panel_style(color: Color, border: Color) -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()
 	style.bg_color = color
 	style.border_color = border
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(10)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(15)
 	style.content_margin_left = 11
 	style.content_margin_right = 11
 	style.content_margin_top = 6
@@ -537,8 +555,12 @@ func surface(parent: Node, fill: String, edge: String) -> PanelContainer:
 
 func emphasis(node: Button) -> void:
 	for state in ["normal", "hover", "pressed"]:
-		var fill := Color("#f0c781") if state == "normal" else Color("#ffddaa")
-		node.add_theme_stylebox_override(state, panel_style(fill, fill))
+		var fill := Color("#ffce56") if state == "normal" else Color("#ffe292")
+		var style := panel_style(fill, Color("#bd6e2b"))
+		style.shadow_color = Color("#271352")
+		style.shadow_size = 3
+		style.shadow_offset = Vector2(0, 3) if state != "pressed" else Vector2.ZERO
+		node.add_theme_stylebox_override(state, style)
 		node.add_theme_color_override("font_color" if state == "normal" else "font_%s_color" % state, Color("#21180e"))
 
 func coin_amount(amount: int) -> String:
@@ -552,40 +574,36 @@ func meter(parent: Node, limit: float, accent: Color) -> ProgressBar:
 	progress.show_percentage = false
 	progress.max_value = limit
 	progress.custom_minimum_size.y = 5
-	progress.add_theme_stylebox_override("background", ball_chip(Color("#254239")))
+	progress.add_theme_stylebox_override("background", ball_chip(Color("#594183")))
 	progress.add_theme_stylebox_override("fill", ball_chip(accent))
 	parent.add_child(progress)
 	return progress
-
-func select_ticket(index: int) -> void:
-	selected_ticket = clampi(index, 0, current.cards.size() - 1)
-	ticket_picker.select(selected_ticket)
-	render_card()
 
 func adapt_layout() -> void:
 	ticket_layout.vertical = size.x < 1070
 	entry_layout.vertical = ticket_layout.vertical
 	cage.custom_minimum_size.y = 188 if ticket_layout.vertical else 252
 	called_board.columns = 15 if ticket_layout.vertical else 10
+	number_grid.columns = 2 if size.x >= 1600 else 1
 	if is_instance_valid(lobby_grid):
 		lobby_grid.columns = 1 if ticket_layout.vertical else 2
 
 func build_ui() -> void:
 	var skin := Theme.new()
 	skin.default_font_size = 17
-	skin.set_stylebox("normal", "Button", panel_style(Color("#19332d"), Color("#34544b")))
-	skin.set_stylebox("hover", "Button", panel_style(Color("#285146"), MINT))
-	skin.set_stylebox("pressed", "Button", panel_style(Color("#305c4e"), MINT))
-	skin.set_stylebox("disabled", "Button", panel_style(Color("#142722"), Color("#294038")))
+	skin.set_stylebox("normal", "Button", panel_style(Color("#5934a5"), Color("#a384ff")))
+	skin.set_stylebox("hover", "Button", panel_style(Color("#7d52ca"), MINT))
+	skin.set_stylebox("pressed", "Button", panel_style(Color("#7143bb"), MINT))
+	skin.set_stylebox("disabled", "Button", panel_style(Color("#332260"), Color("#523b80")))
 	skin.set_stylebox("focus", "Button", panel_style(Color(0, 0, 0, 0), GOLD))
-	skin.set_stylebox("normal", "LineEdit", panel_style(Color("#10221e"), Color("#365b50")))
+	skin.set_stylebox("normal", "LineEdit", panel_style(Color("#31215f"), Color("#8c64e3")))
 	skin.set_color("font_color", "Button", Color("#f7f1e7"))
 	skin.set_color("font_disabled_color", "Button", Color("#9daea5"))
 	theme = skin
 
 	var background := TextureRect.new()
 	var tones := Gradient.new()
-	tones.colors = PackedColorArray([Color("#1d392b"), Color("#081512")])
+	tones.colors = PackedColorArray([Color("#653ccd"), Color("#221144")])
 	var lighting := GradientTexture2D.new()
 	lighting.gradient = tones
 	lighting.fill = GradientTexture2D.FILL_RADIAL
@@ -613,7 +631,7 @@ func build_ui() -> void:
 	brand_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	label(brand_name, "REVANCHE GAMES", 13, MINT)
 	label(brand_name, "Loto Revanche", 34, GOLD)
-	var wallet_chip := surface(brand, "#172c23", "#536344")
+	var wallet_chip := surface(brand, "#56359d", "#a779eb")
 	var wallet_stack := column(wallet_chip, 0)
 	label(wallet_stack, "PORTEFEUILLE", 12, MUTED)
 	wallet_label = label(wallet_stack, "", 22, GOLD)
@@ -621,7 +639,7 @@ func build_ui() -> void:
 	status = label(root, "Entre dans la salle pour voir les parties ouvertes.", 15)
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	body = column(root)
-	connection = surface(body, "#11261f", "#2d5144")
+	connection = surface(body, "#3c2474", "#7753c2")
 	entry_layout = BoxContainer.new()
 	entry_layout.add_theme_constant_override("separation", 20)
 	connection.add_child(entry_layout)
@@ -650,7 +668,7 @@ func build_ui() -> void:
 	home.hide()
 	game = column(body, 9)
 	game.hide()
-	var room_info := row(surface(game, "#132a22", "#3c5f4d"), 12)
+	var room_info := row(surface(game, "#482985", "#7956bc"), 12)
 	var room_title := column(room_info, 2)
 	room_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	room_header = label(room_title, "", 22, Color("#fbf3e5"))
@@ -658,7 +676,7 @@ func build_ui() -> void:
 	stage_phase = label(room_info, "ENTRÉES OUVERTES", 13, GOLD)
 	stage_phase.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 
-	var theatre := column(surface(game, "#0c221b", "#61724d"), 8)
+	var theatre := column(surface(game, "#442790", "#c495ff"), 8)
 	var stage := row(theatre, 14)
 	cage = SubViewportContainer.new()
 	cage.custom_minimum_size = Vector2(0, 173)
@@ -667,11 +685,11 @@ func build_ui() -> void:
 	cage.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	cage.set_script(Cage)
 	stage.add_child(cage)
-	var display_panel := surface(stage, "#071813", "#678774")
+	var display_panel := surface(stage, "#271557", "#bb95fc")
 	display_panel.custom_minimum_size.x = 185
 	var display := column(display_panel, 1)
 	display.alignment = BoxContainer.ALIGNMENT_CENTER
-	var display_name := label(display, "DERNIÈRE BOULE", 14, MINT)
+	var display_name := label(display, "✦  BOULE EN JEU  ✦", 16, MINT)
 	display_name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	ball_label = label(display, "–", 86, GOLD)
 	ball_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -692,7 +710,7 @@ func build_ui() -> void:
 	ticket_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var board_column := column(ticket_layout, 10)
 	board_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var board := column(surface(board_column, "#10241e", "#29483e"), 5)
+	var board := column(surface(board_column, "#302063", "#7553bc"), 5)
 	var board_toolbar := row(board)
 	board_heading = button(board_toolbar, "Numéros sortis", func():
 		called_board.visible = not called_board.visible
@@ -712,30 +730,15 @@ func build_ui() -> void:
 		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		called_cells.append(cell)
 
-	var ticket_panel := column(surface(ticket_column, "#19372e", "#46705d"), 9)
-	var ticket_header := row(ticket_panel)
-	card_caption = label(ticket_header, "Ton carton", 19, Color("#fff1d8"))
-	card_caption.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	ticket_back = button(ticket_header, "‹", func(): select_ticket(selected_ticket - 1))
-	ticket_back.tooltip_text = "Carton précédent"
-	ticket_picker = OptionButton.new()
-	ticket_picker.item_selected.connect(select_ticket)
-	ticket_header.add_child(ticket_picker)
-	ticket_forward = button(ticket_header, "›", func(): select_ticket(selected_ticket + 1))
-	ticket_forward.tooltip_text = "Carton suivant"
-	ticket_progress = meter(ticket_panel, 15.0, MINT)
+	var ticket_panel := column(surface(ticket_column, "#322375", "#8260ed"), 10)
+	card_caption = label(ticket_panel, "Mes cartons", 26, GOLD)
+	var tip := label(ticket_panel, "Appuie sur le numéro doré avant la boule suivante. La coche verte confirme ton clic.", 16)
+	tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	number_grid = GridContainer.new()
-	number_grid.columns = 9
-	number_grid.add_theme_constant_override("h_separation", 4)
-	number_grid.add_theme_constant_override("v_separation", 4)
+	number_grid.columns = 1
+	number_grid.add_theme_constant_override("v_separation", 10)
 	ticket_panel.add_child(number_grid)
-	for index in range(27):
-		var cell := button(number_grid, "", func(): toggle_cell(index))
-		cell.custom_minimum_size.y = 43
-		cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		cell.add_theme_font_size_override("font_size", 19)
-		ticket_cells.append(cell)
-	purchase_panel = column(surface(ticket_column, "#112820", "#3c624e"), 7)
+	purchase_panel = column(surface(ticket_column, "#422778", "#845ddb"), 7)
 	label(purchase_panel, "Acheter des cartons", 20, GOLD)
 	buy_controls = row(purchase_panel)
 	quantity = SpinBox.new()
@@ -752,15 +755,11 @@ func build_ui() -> void:
 	buy_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	start_button = button(purchase_panel, "Lancer le tirage", func(): action.rpc_id(1, "start"))
 	emphasis(start_button)
-	claim_button = button(ticket_panel, "Quine !", func():
-		action.rpc_id(1, "claim", {"stage": current.awards.size(), "ticket": selected_ticket,
-			"numbers": marked.get(selected_ticket, [])}))
-	emphasis(claim_button)
-	results = column(surface(board_column, "#10241e", "#405f4c"), 6)
+	results = column(surface(board_column, "#302063", "#405f4c"), 6)
 	resized.connect(adapt_layout)
 	adapt_layout()
 
-	var footer_panel := surface(frame, "#10231d", "#3b5146")
+	var footer_panel := surface(frame, "#302063", "#633dae")
 	var footer := column(footer_panel, 6)
 	var actions := row(footer)
 	dock_ball = label(actions, "", 19, GOLD)
@@ -813,7 +812,7 @@ func render_lobby() -> void:
 	home.add_child(lobby_grid)
 	adapt_layout()
 	for entry in current.lobby:
-		var card := surface(lobby_grid, "#10241e", "#35564b")
+		var card := surface(lobby_grid, "#302063", "#8562ce")
 		card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var group := column(card, 7)
 		label(group, "Salon %s · %s" % [entry.code, entry.host], 19, GOLD)
@@ -825,7 +824,7 @@ func render_lobby() -> void:
 			func(): action.rpc_id(1, "join", entry.code))
 		join.disabled = current.balance < entry.price
 
-	var create := column(surface(home, "#123023", "#3e6351"))
+	var create := column(surface(home, "#4e2c91", "#9471f1"))
 	label(create, "Créer un salon", 24, GOLD)
 	label(create, "Choisis le prix du carton. Ton premier carton est acheté à l’ouverture du salon.", 15).autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	var prices := row(create, 5)
@@ -847,6 +846,8 @@ func update_clock() -> void:
 	else:
 		var seconds := maxi(0, ceili((next_draw_at - Time.get_ticks_msec()) / 1000.0))
 		draw_status.text = "Réclamations · %ds" % seconds if current.final_window else "Prochaine boule · %ds" % seconds
+		if current_ball_label > 0:
+			dock_ball.text = "Boule %02d · %ds" % [current_ball_label, seconds]
 
 func render_game() -> void:
 	room_header.text = "Salon %s  ·  %d joueurs  ·  %d cartons" % [current.code,
@@ -934,9 +935,9 @@ func paint_board() -> void:
 			cell.add_theme_stylebox_override("normal", ball_chip(GOLD))
 		elif number in shown and (not chronological or index < shown.size()):
 			cell.add_theme_color_override("font_color", MINT)
-			cell.add_theme_stylebox_override("normal", ball_chip(Color("#1b4b3c")))
+			cell.add_theme_stylebox_override("normal", ball_chip(Color("#553488")))
 		else:
-			cell.add_theme_color_override("font_color", Color("#809c90"))
+			cell.add_theme_color_override("font_color", Color("#caadf1"))
 			cell.remove_theme_stylebox_override("normal")
 
 func refresh_price() -> void:
@@ -952,75 +953,73 @@ func refresh_price() -> void:
 
 func render_card() -> void:
 	var cards: Array = current.cards
-	if cards.size() != ticket_picker.item_count:
-		ticket_picker.clear()
-		for index in range(cards.size()):
-			ticket_picker.add_item("Carton %d" % (index + 1))
-		ticket_picker.select(selected_ticket)
-	ticket_picker.visible = cards.size() > 1
-	ticket_back.visible = ticket_picker.visible
-	ticket_forward.visible = ticket_picker.visible
-	ticket_back.disabled = selected_ticket == 0
-	ticket_forward.disabled = selected_ticket + 1 >= cards.size()
-	var marks: Array = marked.get(selected_ticket, [])
-	var used: Array = current.used_lines.get(selected_ticket, [])
-	var card: Array = cards[selected_ticket]
-	var drawn: Array = current.drawn
-	card_caption.text = "Mon carton   %d / 15" % marks.size()
-	card_caption.tooltip_text = "Les numéros sortis sont dorés. Touche un numéro pour le cocher."
-	ticket_progress.value = marks.size()
-	for index in range(ticket_cells.size()):
-		@warning_ignore("integer_division")
-		var line := index / 9
-		var number: int = card[line][index % 9]
-		var cell := ticket_cells[index]
-		var crossed := number in marks
-		var called := number in drawn and (number != last_ball or number == current_ball_label)
-		cell.text = str(number) if number else ""
-		cell.disabled = number == 0 or not called or current.phase != "partie"
-		var fill := Color("#223e34")
-		var edge := Color("#315247")
-		var ink := Color("#bed0c6")
-		if number == 0:
-			fill = Color("#142d26")
-			edge = fill
-		elif crossed:
-			fill = Color("#1e7358")
-			edge = MINT if line in used else Color("#489275")
-			ink = Color("#edfdf4")
-		elif called:
-			fill = Color("#efc888")
-			edge = GOLD
-			ink = Color("#251b10")
-		for state in ["normal", "hover", "pressed", "disabled"]:
-			var tile := panel_style(fill, edge)
-			tile.content_margin_left = 0
-			tile.content_margin_right = 0
-			tile.content_margin_top = 2
-			tile.content_margin_bottom = 2
-			tile.set_corner_radius_all(5)
-			cell.add_theme_stylebox_override(state, tile)
-		for state in ["font_color", "font_hover_color", "font_pressed_color", "font_disabled_color"]:
-			cell.add_theme_color_override(state, ink)
-
+	var key := str([current.code, cards.size(), current.phase, last_ball, current_ball_label,
+		current.awards.size(), marked, current.used_lines])
+	if key == card_render_key:
+		return
+	card_render_key = key
+	card_caption.text = "Mes cartons · %d" % cards.size()
+	if cards.size() != card_views.size():
+		clear_children(number_grid)
+		card_views.clear()
+		for ticket in range(cards.size()):
+			var panel := column(surface(number_grid, "#fff1d1", "#ffab55"), 6)
+			panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var caption := label(panel, "", 20, Color("#382362"))
+			var grid := GridContainer.new()
+			grid.columns = 9
+			panel.add_child(grid)
+			var cells := []
+			for index in range(27):
+				var cell := button(grid, "", toggle_cell.bind(ticket, index))
+				cell.custom_minimum_size.y = 42
+				cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				cell.add_theme_font_size_override("font_size", 20)
+				cells.append(cell)
+			var claim := button(panel, "Réclamer", claim_ticket.bind(ticket))
+			emphasis(claim)
+			card_views.append({"caption": caption, "cells": cells, "claim": claim})
 	var stage: int = current.awards.size()
-	claim_button.visible = current.phase == "partie"
-	claim_button.disabled = true
-	claim_button.text = ["Réclamer la 1ʳᵉ quine", "Réclamer la 2ᵉ quine", "Réclamer le carton plein"][mini(stage, 2)]
-	if stage == 2:
-		claim_button.disabled = marks.size() != 15
-	elif stage < 2:
-		for index in range(3):
-			if index in used:
-				continue
-			var full := true
-			for number in card[index]:
-				if number != 0 and number not in marks:
-					full = false
+	for ticket in range(cards.size()):
+		var view: Dictionary = card_views[ticket]
+		var marks: Array = marked.get(ticket, [])
+		var used: Array = current.used_lines.get(ticket, [])
+		var card: Array = cards[ticket]
+		view.caption.text = "Carton %02d    •    %d / 15 cochés" % [ticket + 1, marks.size()]
+		for index in range(27):
+			@warning_ignore("integer_division")
+			var number: int = card[index / 9][index % 9]
+			var cell: Button = view.cells[index]
+			var checked := number in marks
+			var available := number > 0 and number == current_ball_label and last_ball == current_ball_label
+			cell.text = ("✓ " if checked else "") + str(number) if number else ""
+			cell.disabled = not available or checked or current.phase != "partie"
+			var fill := Color("#f9daa7")
+			var ink := Color("#45346a")
+			if number == 0:
+				fill = Color("#f4e8ca")
+			elif checked:
+				fill = Color("#95edaa")
+			elif available:
+				fill = Color("#ffc261")
+			if not card_tiles.has(fill):
+				card_tiles[fill] = ball_chip(fill)
+			var tile: StyleBoxFlat = card_tiles[fill]
+			for state in ["normal", "hover", "pressed", "disabled"]:
+				cell.add_theme_stylebox_override(state, tile)
+			for state in ["font_color", "font_hover_color", "font_pressed_color", "font_disabled_color"]:
+				cell.add_theme_color_override(state, ink)
+		var claim: Button = view.claim
+		claim.visible = current.phase == "partie"
+		claim.text = ["Réclamer la 1ʳᵉ quine", "Réclamer la 2ᵉ quine", "Réclamer le carton plein"][mini(stage, 2)]
+		claim.disabled = true
+		if stage == 2:
+			claim.disabled = marks.size() != 15
+		elif stage < 2:
+			for line in range(3):
+				if line not in used and Room.marked_row(card[line], marks):
+					claim.disabled = false
 					break
-			if full:
-				claim_button.disabled = false
-				break
 
 func render_results() -> void:
 	var key := "%s/%s/%s/%s" % [current.code, current.phase, str(current.prizes), str(current.awards)]
@@ -1046,17 +1045,15 @@ func render_results() -> void:
 		label(results, "Part Revanche Games · %d pièces" % (
 			current.price * current.tickets - current.prizes[0] - current.prizes[1] - current.prizes[2]), 14)
 
-func toggle_cell(index: int) -> void:
+func claim_ticket(ticket: int) -> void:
+	action.rpc_id(1, "claim", {"stage": current.awards.size(), "ticket": ticket})
+
+func toggle_cell(ticket: int, index: int) -> void:
+	if card_views[ticket].cells[index].disabled:
+		return
 	@warning_ignore("integer_division")
-	var number: int = current.cards[selected_ticket][index / 9][index % 9]
-	if not marked.has(selected_ticket):
-		marked[selected_ticket] = []
-	var marks: Array = marked[selected_ticket]
-	if number in marks:
-		marks.erase(number)
-	else:
-		marks.append(number)
-	render_card()
+	var number: int = current.cards[ticket][index / 9][index % 9]
+	action.rpc_id(1, "mark", {"ticket": ticket, "number": number})
 
 func hello(id: int, value: Variant) -> void:
 	if sessions.has(id) or not (value is Dictionary) or not (value.get("name") is String):
@@ -1077,10 +1074,30 @@ func hello(id: int, value: Variant) -> void:
 		account = identity.uid
 		balance = int(identity.balance)
 		nickname = identity.username
-		for session in sessions.values():
-			if session.uid == account:
-				hint.rpc_id(id, "Ce compte est déjà connecté au loto.")
+		while wallet_busy:
+			await get_tree().process_frame
+		if id not in multiplayer.get_peers() or sessions.has(id):
+			return
+		for old_id in sessions.keys():
+			var previous: Dictionary = sessions[old_id]
+			if previous.uid != account:
+				continue
+			var previous_room = rooms.get(previous.room)
+			if previous_room != null:
+				previous_room.reassign_player(old_id, id)
+				previous.offline = false
+				previous.balance = balance
+				previous.sent_count = 0
+				previous.sent_code = ""
+				sessions[id] = previous
+			sessions.erase(old_id)
+			departing.erase(old_id)
+			if old_id in multiplayer.get_peers():
+				multiplayer.multiplayer_peer.disconnect_peer(old_id)
+			if previous_room != null:
+				broadcast()
 				return
+			break
 	nickname = nickname.strip_edges().replace("\n", " ").left(20)
 	if nickname.is_empty():
 		nickname = "Joueur %d" % (sessions.size() + 1)

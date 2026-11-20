@@ -24,10 +24,10 @@ Utilise `godot` à la place du chemin Mac si l’exécutable figure déjà dans 
 ## Règles
 
 - L’hôte fixe le prix d’un carton à 50, 100, 500 ou 1 000 pièces. Le premier carton est acheté dès la création ou l’entrée dans le salon. Avant le tirage, chaque joueur peut acheter autant d’autres cartons que lui permet son solde.
-- Chaque joueur choisit le carton qu’il veut consulter et coche à la main les numéros sortis. Les coches sont propres à chaque carton. L’historique reste consultable pendant toute la partie.
+- Tous les cartons du joueur sont affichés dans la salle. Chaque numéro se coche à la main avant la boule suivante. Les coches sont propres à chaque carton et l’historique reste consultable pendant la partie. Un compte Revanche Games retrouve ses cartons et ses coches en rouvrant le loto tant que le salon est disponible.
 - Le serveur valide la première réclamation admissible à chaque étape. Une ligne gagnante ne peut servir deux fois. Le carton plein requiert les quinze numéros du même carton.
 - Les deux quines rapportent chacune 15 % de la cagnotte et le carton plein 50 %. Les gains sont arrondis à la pièce inférieure. Le solde de la cagnotte revient à Revanche Games. Les lots encore disponibles après le délai de réclamation qui suit la dernière boule sont remboursés proportionnellement aux cartons.
-- Un départ avant le tirage rembourse tous les cartons du joueur.
+- Le bouton Quitter rembourse les cartons avant le tirage. Changer de page conserve la place du joueur.
 
 ## Web
 
